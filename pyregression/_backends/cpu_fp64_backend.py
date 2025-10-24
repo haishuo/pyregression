@@ -1,11 +1,11 @@
 """
-CPU backend using NumPy + LAPACK.
+CPU backend using NumPy + SciPy.
 
 This is the reference implementation validated against R.
 """
 
 import numpy as np
-from scipy.linalg.lapack import dgeqp3, dormqr
+from scipy.linalg import qr
 from typing import Optional
 
 from .base import BackendBase, CPUBackend, QRResult
@@ -13,14 +13,15 @@ from .base import BackendBase, CPUBackend, QRResult
 
 class CPUBackendFP64(CPUBackend):
     """
-    CPU backend using NumPy + LAPACK.
+    CPU backend using NumPy + SciPy.
     
     Reference implementation for R compatibility.
     Always uses FP64 precision.
     
     Algorithm:
     ---------
-    QR decomposition via LAPACK dgeqp3 (Householder with column pivoting)
+    QR decomposition via SciPy's qr() with column pivoting.
+    This uses LAPACK under the hood but with a simpler interface.
     """
     
     def __init__(self):
@@ -29,7 +30,7 @@ class CPUBackendFP64(CPUBackend):
     
     def qr_with_pivoting(self, X: np.ndarray, tol: Optional[float] = None) -> QRResult:
         """
-        QR decomposition with column pivoting using LAPACK dgeqp3.
+        QR decomposition with column pivoting.
         
         Parameters
         ----------
@@ -45,43 +46,37 @@ class CPUBackendFP64(CPUBackend):
             
         Notes
         -----
-        Uses LAPACK dgeqp3 which replaces LINPACK dqrdc2.
+        Uses SciPy's qr() with pivoting='True', which calls LAPACK.
         Numerically equivalent to R within 1e-12.
         """
         n, p = X.shape
         
-        # Copy to Fortran order
-        X_copy = np.asfortranarray(X.copy(), dtype=np.float64)
+        # Ensure float64
+        X_copy = np.asarray(X, dtype=np.float64)
         
         # Default tolerance
         if tol is None:
             eps = np.finfo(np.float64).eps
             tol = max(n, p) * eps * np.linalg.norm(X_copy, 'fro')
         
-        # Initialize pivot array
-        jpvt = np.zeros(p, dtype=np.int32)
+        # QR decomposition with column pivoting
+        # mode='full' returns full Q (n x n) and R (n x p)
+        # This matches R's behavior
+        Q, R, P = qr(X_copy, mode='full', pivoting=True)
         
-        # Call LAPACK dgeqp3
-        qr, jpvt, tau, info = dgeqp3(X_copy, jpvt)
-        
-        if info < 0:
-            raise ValueError(f"LAPACK dgeqp3 failed: illegal value at argument {-info}")
-        
-        # Determine rank
-        R_diag = np.abs(np.diag(qr))
+        # Determine rank from diagonal of R
+        R_diag = np.abs(np.diag(R))
         if R_diag[0] == 0:
             rank = 0
         else:
             rank = np.sum(R_diag >= tol * R_diag[0])
         
-        # Extract R (upper triangular part)
-        R = np.triu(qr)
-        
-        # Store Q in implicit form (tau + qr lower part)
-        Q_implicit = (qr, tau)
+        # Store Q explicitly (we'll need it for apply_qt_to_vector)
+        Q_implicit = Q  # Store full Q matrix
         
         # Convert pivot to 1-indexed (R convention)
-        pivot = jpvt.astype(np.int64) + 1
+        # SciPy returns P as column indices (0-indexed)
+        pivot = P.astype(np.int64) + 1
         
         return QRResult(
             R=R,
@@ -91,14 +86,14 @@ class CPUBackendFP64(CPUBackend):
             tol=tol,
         )
     
-    def apply_qt_to_vector(self, Q_implicit: tuple, y: np.ndarray) -> np.ndarray:
+    def apply_qt_to_vector(self, Q_implicit: np.ndarray, y: np.ndarray) -> np.ndarray:
         """
         Apply Q' to vector y.
         
         Parameters
         ----------
-        Q_implicit : tuple
-            (qr, tau) from LAPACK dgeqp3
+        Q_implicit : ndarray
+            Q matrix from QR decomposition
         y : ndarray
             Vector to transform
             
@@ -107,23 +102,10 @@ class CPUBackendFP64(CPUBackend):
         qty : ndarray
             Q' @ y
         """
-        qr, tau = Q_implicit
+        Q = Q_implicit  # Q is stored explicitly
         
-        # Copy y to Fortran order
-        y_copy = np.asfortranarray(y.copy(), dtype=np.float64)
-        
-        # Apply Q' using LAPACK dormqr
-        # side='L' (multiply from left), trans='T' (transpose Q)
-        qty, info = dormqr(
-            'L',  # side: multiply from Left
-            'T',  # trans: Transpose (Q')
-            qr,   # QR factorization
-            tau,  # Householder scalars
-            y_copy,  # vector to multiply
-        )
-        
-        if info < 0:
-            raise ValueError(f"LAPACK dormqr failed: illegal value at argument {-info}")
+        # Q' @ y
+        qty = Q.T @ y
         
         return qty
     
