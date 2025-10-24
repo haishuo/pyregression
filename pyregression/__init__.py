@@ -7,11 +7,14 @@ Licensed under GPL-3.0
 
 __version__ = "0.1.0"
 
-# Reference implementation (NumPy, R-compatible)
-from pyregression.reference.linear_model import LinearModel
-from pyregression.reference.glm import GLM
+from .lm import LinearModel
+from .glm import GLM
+from ._backends import get_backend, list_available_backends
 
 __all__ = [
     "LinearModel",
     "GLM",
+    "get_backend",
+    "list_available_backends",
+    "__version__",
 ]

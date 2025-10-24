@@ -74,3 +74,27 @@ GPL-3.0 (to match R)
 
 R source code (for algorithm reference) is included in `reference/r-source/`.
 Algorithm analysis and specification: see `docs/r_algorithm_analysis.md`.
+
+
+## Architecture
+
+PyRegression follows the same proven architecture as PyMVNMLE:
+
+**Two-Track System:**
+- **CPU Track**: NumPy + LAPACK, always FP64, R-compatible (reference implementation)
+- **GPU Track**: PyTorch, FP32/FP64, statistically equivalent (performance)
+
+**Precision-Based Design:**
+- FP32 for consumer GPUs (RTX, Metal)
+- FP64 for data center GPUs (A100, H100) and CPU
+- Automatic selection based on hardware capabilities
+```python
+from pyregression import LinearModel
+
+# Auto-selects optimal backend
+model = LinearModel()  # CPU FP64 by default
+
+# Explicit selection
+model = LinearModel(backend='gpu', use_fp64=False)  # GPU FP32
+model = LinearModel(backend='cpu')  # CPU FP64 (reference)
+```
