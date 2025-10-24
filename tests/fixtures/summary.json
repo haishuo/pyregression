@@ -1,0 +1,14 @@
+{
+  "r_version": ["4.3.3"],
+  "r_platform": ["x86_64-pc-linux-gnu"],
+  "timestamp": ["2025-10-24 18:16:46"],
+  "test_cases": ["simple_regression.json", "large_regression.json", "rank_deficient.json", "ill_conditioned.json", "single_predictor.json", "intercept_only.json"],
+  "description": {
+    "simple_regression": ["Well-conditioned, 100 obs, 3 predictors"],
+    "large_regression": ["Larger problem, 500 obs, 10 predictors"],
+    "rank_deficient": ["Perfect collinearity (rank deficient)"],
+    "ill_conditioned": ["Near collinearity (ill-conditioned)"],
+    "single_predictor": ["Simplest case, single predictor"],
+    "intercept_only": ["Edge case, no predictors"]
+  }
+}
