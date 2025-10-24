@@ -95,8 +95,6 @@ def fit_linear_model(
         raise ValueError(f"Singular fit: rank {qr_result.rank} < {p} columns")
     
     # Solve R β = Q'y
-    # TODO: Implement proper back-solve using backend
-    # For now, placeholder
     from scipy.linalg import solve_triangular
     
     # Compute Q'y (need backend to apply Q)
@@ -122,7 +120,11 @@ def fit_linear_model(
     coef[pivot_idx] = coef_pivoted[:rank]
     
     # Compute fitted values and residuals
-    fitted = X_with_intercept @ coef
+    # CRITICAL: For rank-deficient cases, replace NA coefficients with 0
+    # so that matrix multiplication works correctly
+    coef_for_prediction = np.nan_to_num(coef, nan=0.0)
+    fitted = X_with_intercept @ coef_for_prediction
+    
     if offset is not None:
         fitted += offset
     
