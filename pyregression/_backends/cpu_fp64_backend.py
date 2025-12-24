@@ -70,7 +70,9 @@ class CPUBackendFP64(CPUBackend):
             tol = max(n_good, p) * eps * np.linalg.norm(X_work, 'fro')
         
         # QR decomposition with column pivoting
-        Q, R, P = qr(X_work, mode='full', pivoting=True)
+        # Use 'economic' mode to avoid allocating huge Q matrix
+        # (We only need Q'y, not the full Q)
+        Q, R, P = qr(X_work, mode='economic', pivoting=True)
         
         # Determine rank
         R_diag = np.abs(np.diag(R))
@@ -100,6 +102,10 @@ class CPUBackendFP64(CPUBackend):
         # Compute fitted values and residuals on original scale
         X_full = np.column_stack([np.ones(n), X])
         
+        # CRITICAL: coef is in ORIGINAL column order (accounting for pivoting)
+        # We already handled pivoting when storing coef[P[:rank]] = coef_active
+        # So coef[i] corresponds to X_full[:, i], NOT to the pivoted columns
+        
         # Compute fitted values (handling NaN coefficients for aliased terms)
         valid_coef = ~np.isnan(coef)
         if np.any(valid_coef):
@@ -107,11 +113,12 @@ class CPUBackendFP64(CPUBackend):
         else:
             fitted = np.zeros(n, dtype=np.float64)
         
-        residuals = y - fitted
-        
-        # Adjust fitted values for offset
+        # CRITICAL FIX: Add offset to fitted BEFORE computing residuals
         if offset is not None:
-            fitted += offset
+            fitted = fitted + offset
+        
+        # Now compute residuals on original scale
+        residuals = y - fitted
         
         return LinearModelResult(
             coef=coef,
@@ -126,9 +133,8 @@ class CPUBackendFP64(CPUBackend):
     
     def get_device_info(self) -> dict:
         """Get backend information."""
-        import scipy
         return {
             'backend': 'cpu',
             'precision': 'fp64',
-            'library': f'NumPy {np.__version__}, SciPy {scipy.__version__}',
+            'library': 'NumPy + SciPy (LAPACK)',
         }

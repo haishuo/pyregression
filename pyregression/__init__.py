@@ -5,16 +5,17 @@ Copyright (C) 2024 SGCX
 Licensed under GPL-3.0
 """
 
-__version__ = "0.1.0"
+__version__ = "1.0.0"
 
-from .lm import LinearModel
-from .glm import GLM
+# Import main user-facing API
+from .lm import lm, LinearModel
+
+# Import backend utilities (for advanced users)
 from ._backends import get_backend, list_available_backends
 
 __all__ = [
-    "LinearModel",
-    "GLM",
-    "get_backend",
-    "list_available_backends",
-    "__version__",
+    'lm',
+    'LinearModel',
+    'get_backend',
+    'list_available_backends',
 ]

@@ -176,15 +176,31 @@ class PyTorchBackendFP64(GPUBackendFP64):
         )
     
     def _qr_with_pivoting_gpu(self, X, tol):
-        """QR with pivoting - simplified for now."""
-        torch = self.torch
-        p = X.shape[1]
-        
-        # Unpivoted QR
-        Q, R = torch.linalg.qr(X, mode='complete')
-        pivot = torch.arange(p, dtype=torch.int64, device=self.device)
-        
-        return Q, R, pivot
+            """
+            QR with column pivoting on GPU.
+            
+            Uses economic/reduced QR to avoid massive memory allocation.
+            For n >> p, this is critical: 
+            - 'complete' mode: Q is (n, n) - HUGE for large n
+            - 'reduced' mode: Q is (n, p) - Much smaller!
+            
+            Simplified version - just use unpivoted QR for now.
+            TODO: Implement proper Householder with pivoting.
+            """
+            torch = self.torch
+            n, p = X.shape
+            
+            # CRITICAL: Use 'reduced' mode to avoid OOM on large datasets
+            # For n=500,000, p=51:
+            #   complete: Q is 500k × 500k = 1.86 TiB ❌
+            #   reduced:  Q is 500k × 51 = 195 MB ✅
+            Q, R = torch.linalg.qr(X, mode='reduced')
+            
+            # For now: identity pivot (no column reordering)
+            # This works but isn't optimal for rank-deficient cases
+            pivot = torch.arange(p, dtype=torch.int64, device=self.device)
+            
+            return Q, R, pivot
     
     def get_device_info(self) -> dict:
         """Get backend information."""
