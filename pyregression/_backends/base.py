@@ -102,7 +102,13 @@ class BackendFactory:
             from .cpu_fp64_backend import CPUBackendFP64
             return CPUBackendFP64()
         
-        # GPU available
+        # GPU available - check type
+        if caps.gpu_type == 'mlx':
+            # Apple Silicon - MLX only supports FP32
+            from .gpu_metal_backend import MLXBackendFP32
+            return MLXBackendFP32()
+        
+        # NVIDIA GPU
         if use_fp64:
             from .gpu_fp64_backend import PyTorchBackendFP64
             return PyTorchBackendFP64()

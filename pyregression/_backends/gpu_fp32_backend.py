@@ -1,7 +1,7 @@
 """
 GPU backend using PyTorch with FP32 precision.
 
-Implements complete linear regression on GPU.
+NVIDIA CUDA GPUs only. For Apple Silicon, use MLX backend.
 """
 
 import numpy as np
@@ -17,6 +17,12 @@ class PyTorchBackendFP32(GPUBackendFP32):
     
     Keeps all computation on GPU using torch tensors.
     Only converts at entry (numpy → torch) and exit (torch → numpy).
+    
+    Requirements:
+    - NVIDIA GPU with CUDA support
+    - PyTorch with CUDA enabled
+    
+    For Apple Silicon GPUs, use MLXBackendFP32 instead.
     """
     
     def __init__(self, device: Optional[str] = None):
@@ -36,19 +42,33 @@ class PyTorchBackendFP32(GPUBackendFP32):
         self.device = self._select_device(device)
         
     def _select_device(self, requested: Optional[str]) -> Any:
-        """Select GPU device."""
+        """Select CUDA GPU device. Fails if CUDA unavailable."""
         torch = self.torch
         
         if requested:
-            return torch.device(requested)
+            device = torch.device(requested)
+            
+            # Explicitly reject MPS
+            if device.type == 'mps':
+                raise ValueError(
+                    "PyTorch backend does not support Apple MPS (Metal). "
+                    "For Apple Silicon GPU acceleration, use: "
+                    "backend = get_backend('mlx')"
+                )
+            
+            return device
         
-        if torch.cuda.is_available():
-            return torch.device('cuda')
-        elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-            return torch.device('mps')
-        else:
-            warnings.warn("No GPU available, using CPU")
-            return torch.device('cpu')
+        # Auto-detect CUDA only
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "PyTorch backend requires NVIDIA CUDA GPU.\n"
+                "Options:\n"
+                "  1. Use get_backend('cpu') for CPU (FP64)\n"
+                "  2. Use get_backend('mlx') for Apple Silicon GPU\n"
+                "  3. Install CUDA-enabled PyTorch"
+            )
+        
+        return torch.device('cuda')
     
     def fit_linear_model(
         self,
