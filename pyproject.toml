@@ -43,3 +43,6 @@ dev = [
 [project.urls]
 Homepage = "https://github.com/sgcx/PyRegression"
 Repository = "https://github.com/sgcx/PyRegression"
+
+[tool.setuptools]
+packages = ["pyregression"]
