@@ -139,14 +139,17 @@ class TestPyTorchBackend:
         backend = get_backend('pytorch')
         assert backend is not None
         assert 'pytorch' in backend.name
-        assert 'cuda' in backend.name
+        # Backend name is 'pytorch_fp32' or 'pytorch_fp64', not 'pytorch_cuda'
+        assert backend.precision in ['fp32', 'fp64']
     
     def test_pytorch_device_info(self):
         """Test PyTorch backend device info."""
         backend = get_backend('pytorch')
         info = backend.get_device_info()
-        assert 'pytorch' in info['backend']
-        assert 'cuda' in info['device']
+        # PyTorch backend returns 'gpu' as backend type
+        assert info['backend'] == 'gpu'
+        # Check for CUDA in device string
+        assert 'cuda' in str(info['device']).lower()
     
     def test_pytorch_simple_regression(self):
         """Test simple regression on PyTorch."""
