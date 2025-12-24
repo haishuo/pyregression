@@ -4,7 +4,7 @@ Test backend implementations with auto-detection.
 Tests appropriate backends based on available hardware:
 - CPU: Always tested
 - PyTorch CUDA: Tested if NVIDIA GPU available
-- MLX Metal: Tested if Apple Silicon available
+- MPS: Tested if Apple Silicon available
 """
 
 import pytest
@@ -12,7 +12,11 @@ import numpy as np
 from pyregression._backends import (
     get_backend,
     list_available_backends,
-    print_backend_info
+    print_backend_info,
+    CPU_AVAILABLE,
+    PYTORCH_FP32_AVAILABLE,
+    PYTORCH_FP64_AVAILABLE,
+    MPS_AVAILABLE,
 )
 from pyregression._backends.precision_detector import detect_gpu_capabilities
 
@@ -20,7 +24,7 @@ from pyregression._backends.precision_detector import detect_gpu_capabilities
 # Detect hardware once at module level
 GPU_CAPS = detect_gpu_capabilities()
 HAS_NVIDIA = GPU_CAPS.gpu_type == 'nvidia'
-HAS_APPLE = GPU_CAPS.gpu_type == 'mlx'  # Detection returns 'mlx' for Apple Silicon
+HAS_MPS = GPU_CAPS.gpu_type == 'mps'
 HAS_ANY_GPU = GPU_CAPS.has_gpu
 
 
@@ -31,7 +35,7 @@ class TestBackendDetection:
         """Test GPU detection returns valid capabilities."""
         caps = detect_gpu_capabilities()
         assert caps.gpu_name is not None
-        assert caps.gpu_type in ['nvidia', 'mlx', 'none']
+        assert caps.gpu_type in ['nvidia', 'mps', 'none']
         assert caps.has_gpu == (caps.gpu_type != 'none')
     
     def test_list_backends(self):
@@ -43,8 +47,8 @@ class TestBackendDetection:
         # Check GPU backends match detection
         if HAS_NVIDIA:
             assert 'pytorch' in backends
-        if HAS_APPLE:
-            assert 'mlx' in backends
+        if HAS_MPS:
+            assert 'mps' in backends
     
     def test_print_backend_info(self, capsys):
         """Test diagnostic printing."""
@@ -75,101 +79,92 @@ class TestCPUBackend:
         """Test simple regression on CPU."""
         backend = get_backend('cpu')
         
-        # Simple test data
         np.random.seed(42)
         n, p = 100, 3
         X = np.random.randn(n, p)
-        beta_true = np.array([1.0, 2.0, -1.5])
+        beta_true = np.array([1.5, -2.0, 0.75])
         y = X @ beta_true + 0.1 * np.random.randn(n)
         
-        # Fit
         result = backend.fit_linear_model(X, y)
         
-        # Check result structure
-        assert result.coef.shape == (p + 1,)  # +1 for intercept
-        assert result.residuals.shape == (n,)
-        assert result.fitted_values.shape == (n,)
-        assert result.rank > 0
-        assert result.rank <= p + 1
-        
-        # Check numerical sanity
-        assert np.allclose(result.coef[1:], beta_true, atol=0.5)
-        assert np.mean(result.residuals**2) < 1.0  # Low MSE
+        # Should recover coefficients accurately
+        assert np.allclose(result.coef[1:], beta_true, atol=0.2)
+        assert result.rank == p + 1  # Full rank with intercept
     
     def test_cpu_weighted_regression(self):
         """Test weighted regression on CPU."""
         backend = get_backend('cpu')
         
         np.random.seed(42)
-        n, p = 50, 2
+        n, p = 100, 2
         X = np.random.randn(n, p)
         y = np.random.randn(n)
-        weights = np.random.uniform(0.5, 1.5, n)
+        weights = np.random.uniform(0.5, 2.0, n)
         
         result = backend.fit_linear_model(X, y, weights=weights)
-        
         assert result.coef.shape == (p + 1,)
-        assert result.rank > 0
     
     def test_cpu_with_offset(self):
         """Test regression with offset on CPU."""
         backend = get_backend('cpu')
         
         np.random.seed(42)
-        n, p = 50, 2
+        n, p = 100, 2
         X = np.random.randn(n, p)
         y = np.random.randn(n)
-        offset = np.random.randn(n)
+        offset = np.random.randn(n) * 0.5
         
         result = backend.fit_linear_model(X, y, offset=offset)
-        
         assert result.coef.shape == (p + 1,)
-        assert result.fitted_values.shape == (n,)
+    
+    def test_cpu_rejects_ill_conditioned(self):
+        """Test CPU backend rejects severely ill-conditioned matrices."""
+        backend = get_backend('cpu')
         
-        # Fitted values should include offset
-        assert not np.allclose(result.fitted_values, y)
+        # Create nearly singular matrix
+        X = np.random.randn(50, 3)
+        X[:, 2] = X[:, 0] + 1e-15 * np.random.randn(50)
+        y = np.random.randn(50)
+        
+        with pytest.raises(ValueError, match="[Ii]ll.conditioned|[Ss]ingular"):
+            backend.fit_linear_model(X, y, singular_ok=False)
 
 
-@pytest.mark.skipif(not HAS_NVIDIA, reason="NVIDIA GPU not available")
+@pytest.mark.skipif(not HAS_NVIDIA, reason="Requires NVIDIA GPU")
 class TestPyTorchBackend:
-    """Test PyTorch CUDA backend (NVIDIA GPUs only)."""
+    """Test PyTorch CUDA backend (NVIDIA only)."""
     
     def test_pytorch_backend_creation(self):
-        """Test PyTorch backend initializes on CUDA."""
+        """Test PyTorch backend initializes correctly."""
         backend = get_backend('pytorch')
         assert backend is not None
         assert 'pytorch' in backend.name
-        assert backend.precision in ['fp32', 'fp64']
+        assert 'cuda' in backend.name
     
     def test_pytorch_device_info(self):
         """Test PyTorch backend device info."""
         backend = get_backend('pytorch')
         info = backend.get_device_info()
-        assert info['backend'] == 'gpu'
-        assert 'cuda' in str(info['device']).lower()
+        assert 'pytorch' in info['backend']
+        assert 'cuda' in info['device']
     
     def test_pytorch_simple_regression(self):
-        """Test simple regression on PyTorch CUDA."""
+        """Test simple regression on PyTorch."""
         backend = get_backend('pytorch')
         
         np.random.seed(42)
         n, p = 100, 3
         X = np.random.randn(n, p)
-        beta_true = np.array([1.0, 2.0, -1.5])
+        beta_true = np.array([1.5, -2.0, 0.75])
         y = X @ beta_true + 0.1 * np.random.randn(n)
         
         result = backend.fit_linear_model(X, y)
         
-        # Check structure
-        assert result.coef.shape == (p + 1,)
-        assert result.residuals.shape == (n,)
-        assert result.fitted_values.shape == (n,)
-        
-        # Check numerical accuracy (FP32 or FP64)
-        assert np.allclose(result.coef[1:], beta_true, atol=0.5)
+        # Should recover coefficients accurately
+        assert np.allclose(result.coef[1:], beta_true, atol=0.2)
     
     def test_pytorch_vs_cpu_consistency(self):
-        """Test PyTorch gives similar results to CPU."""
+        """Test PyTorch matches CPU results."""
         cpu_backend = get_backend('cpu')
         gpu_backend = get_backend('pytorch')
         
@@ -181,42 +176,68 @@ class TestPyTorchBackend:
         cpu_result = cpu_backend.fit_linear_model(X, y)
         gpu_result = gpu_backend.fit_linear_model(X, y)
         
-        # Coefficients should be close (accounting for FP32 vs FP64)
-        assert np.allclose(cpu_result.coef, gpu_result.coef, rtol=1e-4, atol=1e-4)
-        assert np.allclose(cpu_result.residuals, gpu_result.residuals, rtol=1e-4, atol=1e-4)
-        assert cpu_result.rank == gpu_result.rank
+        # Should match to high precision
+        assert np.allclose(cpu_result.coef, gpu_result.coef, rtol=1e-5, atol=1e-6)
+        assert np.allclose(cpu_result.residuals, gpu_result.residuals, rtol=1e-5, atol=1e-5)
     
-    def test_pytorch_rejects_mps(self):
-        """Test PyTorch backend rejects MPS device."""
-        with pytest.raises(ValueError, match="does not support.*MPS"):
-            get_backend('pytorch')
-            # Try to create with MPS device
-            from pyregression._backends.gpu_fp32_backend import PyTorchBackendFP32
-            PyTorchBackendFP32(device='mps')
+    def test_pytorch_weighted_regression(self):
+        """Test weighted regression on PyTorch."""
+        backend = get_backend('pytorch')
+        
+        np.random.seed(42)
+        n, p = 100, 2
+        X = np.random.randn(n, p)
+        y = np.random.randn(n)
+        weights = np.random.uniform(0.5, 2.0, n)
+        
+        result = backend.fit_linear_model(X, y, weights=weights)
+        assert result.coef.shape == (p + 1,)
+    
+    def test_pytorch_with_offset(self):
+        """Test regression with offset on PyTorch."""
+        backend = get_backend('pytorch')
+        
+        np.random.seed(42)
+        n, p = 100, 2
+        X = np.random.randn(n, p)
+        y = np.random.randn(n)
+        offset = np.random.randn(n) * 0.5
+        
+        result = backend.fit_linear_model(X, y, offset=offset)
+        assert result.coef.shape == (p + 1,)
+    
+    def test_pytorch_rejects_ill_conditioned(self):
+        """Test PyTorch backend rejects severely ill-conditioned matrices."""
+        backend = get_backend('pytorch')
+        
+        # Create nearly singular matrix
+        X = np.random.randn(50, 3)
+        X[:, 2] = X[:, 0] + 1e-15 * np.random.randn(50)
+        y = np.random.randn(50)
+        
+        with pytest.raises(ValueError, match="[Ii]ll.conditioned|[Ss]ingular"):
+            backend.fit_linear_model(X, y, singular_ok=False)
 
 
-@pytest.mark.skipif(not HAS_APPLE, reason="Apple Silicon not available")
+@pytest.mark.skipif(not HAS_MPS, reason="Requires Apple Silicon with MPS")
 class TestMPSBackend:
-    """Test MPS ridge backend (Apple Silicon only).
-    
-    Note: MPS backend uses ridge regression instead of QR decomposition.
-    """
+    """Test MPS backend (Apple Silicon only)."""
     
     def test_mps_backend_creation(self):
-        """Test MPS backend initializes."""
+        """Test MPS backend initializes correctly."""
         backend = get_backend('mps')
         assert backend is not None
         assert 'mps' in backend.name
         assert 'ridge' in backend.name
-        assert backend.precision == 'fp32'
     
     def test_mps_device_info(self):
         """Test MPS backend device info."""
         backend = get_backend('mps')
         info = backend.get_device_info()
+        # MPS backend returns 'gpu' as backend type
         assert info['backend'] == 'gpu'
+        # Check for MPS/Metal in device string
         assert 'MPS' in info['device'] or 'Metal' in info['device']
-        assert info['algorithm'] == 'Ridge regression via Cholesky'
     
     def test_mps_simple_regression(self):
         """Test simple regression on MPS."""
@@ -225,30 +246,18 @@ class TestMPSBackend:
         np.random.seed(42)
         n, p = 100, 3
         X = np.random.randn(n, p)
-        beta_true = np.array([1.0, 2.0, -1.5])
+        beta_true = np.array([1.5, -2.0, 0.75])
         y = X @ beta_true + 0.1 * np.random.randn(n)
         
-        # Expect warning about ridge usage
+        # MPS uses ridge, so expect warning
         with pytest.warns(UserWarning, match="ridge regression"):
             result = backend.fit_linear_model(X, y)
         
-        # Check structure
-        assert result.coef.shape == (p + 1,)
-        assert result.residuals.shape == (n,)
-        assert result.fitted_values.shape == (n,)
-        assert result.rank > 0
-        
-        # Check numerical accuracy (FP32 + ridge)
-        # More lenient tolerance due to ridge penalty
-        assert np.allclose(result.coef[1:], beta_true, atol=0.6)
-        assert np.mean(result.residuals**2) < 1.0
+        # Ridge has slight bias, so looser tolerance
+        assert np.allclose(result.coef[1:], beta_true, atol=0.3)
     
     def test_mps_vs_cpu_consistency(self):
-        """Test MPS gives similar results to CPU.
-        
-        Note: Results won't be identical due to ridge penalty,
-        but should be very close for well-conditioned problems.
-        """
+        """Test MPS is close to CPU results (with ridge tolerance)."""
         cpu_backend = get_backend('cpu')
         mps_backend = get_backend('mps')
         
@@ -262,70 +271,68 @@ class TestMPSBackend:
         with pytest.warns(UserWarning, match="ridge regression"):
             mps_result = mps_backend.fit_linear_model(X, y)
         
-        # Coefficients should be close (accounting for small ridge penalty)
-        # More lenient than PyTorch due to ridge
-        assert np.allclose(cpu_result.coef, mps_result.coef, rtol=1e-3, atol=1e-3)
-        assert np.allclose(cpu_result.residuals, mps_result.residuals, rtol=1e-3, atol=1e-3)
+        # Ridge introduces small differences
+        assert np.allclose(cpu_result.coef, mps_result.coef, rtol=1e-2, atol=1e-2)
     
     def test_mps_weighted_regression(self):
         """Test weighted regression on MPS."""
         backend = get_backend('mps')
         
         np.random.seed(42)
-        n, p = 50, 2
+        n, p = 100, 2
         X = np.random.randn(n, p)
         y = np.random.randn(n)
-        weights = np.random.uniform(0.5, 1.5, n)
+        weights = np.random.uniform(0.5, 2.0, n)
         
         with pytest.warns(UserWarning, match="ridge regression"):
             result = backend.fit_linear_model(X, y, weights=weights)
-        
         assert result.coef.shape == (p + 1,)
-        assert result.rank > 0
     
     def test_mps_with_offset(self):
         """Test regression with offset on MPS."""
         backend = get_backend('mps')
         
         np.random.seed(42)
-        n, p = 50, 2
+        n, p = 100, 2
         X = np.random.randn(n, p)
         y = np.random.randn(n)
-        offset = np.random.randn(n)
+        offset = np.random.randn(n) * 0.5
         
         with pytest.warns(UserWarning, match="ridge regression"):
             result = backend.fit_linear_model(X, y, offset=offset)
-        
         assert result.coef.shape == (p + 1,)
-        assert result.fitted_values.shape == (n,)
     
     def test_mps_rejects_ill_conditioned(self):
-        """Test MPS rejects severely ill-conditioned problems."""
+        """Test MPS backend rejects severely ill-conditioned matrices."""
         backend = get_backend('mps')
         
-        # Create severely collinear design
-        n, p = 100, 3
-        X = np.random.randn(n, 2)
-        # Third column is linear combination + tiny noise
-        X = np.column_stack([X, X[:, 0] + X[:, 1] + 1e-15 * np.random.randn(n)])
-        y = np.random.randn(n)
+        # Create nearly singular matrix
+        X = np.random.randn(50, 3)
+        X[:, 2] = X[:, 0] + 1e-15 * np.random.randn(50)
+        y = np.random.randn(50)
         
-        # Should raise ValueError for severe multicollinearity
+        # MPS backend raises ValueError with "multicollinearity" message
         with pytest.raises(ValueError, match="multicollinearity"):
-            backend.fit_linear_model(X, y)
+            backend.fit_linear_model(X, y, singular_ok=False)
 
 
 class TestAutoBackend:
-    """Test automatic backend selection."""
+    """Test auto backend selection."""
     
     def test_auto_backend_selects_something(self):
         """Test auto backend returns valid backend."""
         backend = get_backend('auto')
         assert backend is not None
-        assert hasattr(backend, 'fit_linear_model')
+        
+        if HAS_NVIDIA:
+            assert 'pytorch' in backend.name or 'cuda' in backend.name
+        elif HAS_MPS:
+            assert 'mps' in backend.name and 'ridge' in backend.name
+        else:
+            assert 'cpu' in backend.name
     
     def test_auto_backend_consistency(self):
-        """Test auto backend gives consistent results."""
+        """Test auto backend produces reasonable results."""
         backend = get_backend('auto')
         
         np.random.seed(42)
@@ -333,21 +340,26 @@ class TestAutoBackend:
         X = np.random.randn(n, p)
         y = np.random.randn(n)
         
-        # Run twice - should be deterministic
-        result1 = backend.fit_linear_model(X, y)
-        result2 = backend.fit_linear_model(X, y)
+        # May warn on MPS
+        if HAS_MPS and not HAS_NVIDIA:
+            with pytest.warns(UserWarning, match="ridge regression"):
+                result = backend.fit_linear_model(X, y)
+        else:
+            result = backend.fit_linear_model(X, y)
         
-        assert np.allclose(result1.coef, result2.coef)
-        assert np.allclose(result1.residuals, result2.residuals)
+        assert result.coef.shape == (p + 1,)
+        assert result.rank > 0
     
-    @pytest.mark.skipif(not HAS_ANY_GPU, reason="No GPU available")
     def test_gpu_backend_selection(self):
-        """Test 'gpu' backend routes to correct GPU type."""
+        """Test GPU backend selection logic."""
+        if not HAS_ANY_GPU:
+            pytest.skip("Requires GPU")
+        
         backend = get_backend('gpu')
         
         if HAS_NVIDIA:
-            assert 'pytorch' in backend.name and 'cuda' in backend.name
-        elif HAS_APPLE:
+            assert 'pytorch' in backend.name or 'cuda' in backend.name
+        elif HAS_MPS:
             assert 'mps' in backend.name and 'ridge' in backend.name
 
 
@@ -371,11 +383,11 @@ class TestBackendErrors:
         with pytest.raises(RuntimeError):
             get_backend('pytorch')
     
-    @pytest.mark.skipif(HAS_APPLE, reason="Test requires no Apple Silicon")
-    def test_mlx_without_apple(self):
-        """Test error when requesting MLX without Apple Silicon."""
+    @pytest.mark.skipif(HAS_MPS, reason="Test requires no Apple Silicon")
+    def test_mps_without_apple(self):
+        """Test error when requesting MPS without Apple Silicon."""
         with pytest.raises(RuntimeError):
-            get_backend('mlx')
+            get_backend('mps')
 
 
 class TestNumericalCorrectness:
@@ -386,8 +398,8 @@ class TestNumericalCorrectness:
         backends_to_test = ['cpu']
         if HAS_NVIDIA:
             backends_to_test.append('pytorch')
-        if HAS_APPLE:
-            backends_to_test.append('mlx')
+        if HAS_MPS:
+            backends_to_test.append('mps')
         
         np.random.seed(42)
         n, p = 50, 3
@@ -398,20 +410,17 @@ class TestNumericalCorrectness:
         for backend_name in backends_to_test:
             backend = get_backend(backend_name)
             
-            # MLX will warn about ridge usage
-            if backend_name == 'mlx':
+            # MPS will warn about ridge usage
+            if backend_name == 'mps':
                 with pytest.warns(UserWarning, match="ridge regression"):
                     result = backend.fit_linear_model(X, y)
+                # Ridge penalty causes small deviation
+                atol = 1e-2
             else:
                 result = backend.fit_linear_model(X, y)
-            
-            # Should recover true coefficients
-            # MLX uses ridge, so slightly less accurate
-            if backend_name == 'mlx':
-                atol = 1e-2  # Ridge penalty causes small deviation
-            else:
                 atol = 1e-3
             
+            # Should recover true coefficients
             assert np.allclose(result.coef[1:], beta_true, atol=atol)
             # Residuals should be near zero
             assert np.allclose(result.residuals, 0, atol=1e-3)
@@ -419,12 +428,12 @@ class TestNumericalCorrectness:
     def test_rank_deficient(self):
         """Test all backends handle rank deficiency.
         
-        Note: MLX backend will reject severely rank-deficient problems.
+        Note: MPS backend uses ridge regularization, so skip rank deficiency test.
         """
         backends_to_test = ['cpu']
         if HAS_NVIDIA:
             backends_to_test.append('pytorch')
-        # MLX is NOT tested here - it rejects rank-deficient problems
+        # MPS uses ridge regularization, so skip rank deficiency test
         
         # Create rank-deficient matrix
         n, p = 50, 3

@@ -1,199 +1,137 @@
 """
-GPU capability detection and precision support analysis.
+GPU capability detection for precision selection.
 
-Detects NVIDIA CUDA and Apple Metal GPUs.
+Detects NVIDIA GPUs (via PyTorch CUDA) and Apple Silicon (via PyTorch MPS).
 """
 
-from dataclasses import dataclass
 from enum import Enum
+from dataclasses import dataclass
 from typing import Optional
-import platform
 
 
-class PrecisionSupport(Enum):
-    """GPU FP64 support levels."""
-    FULL_FP64 = "full_fp64"      # Full speed FP64 (A100, H100)
-    GIMPED_FP64 = "gimped_fp64"  # Throttled FP64 (RTX, consumer cards)
-    NO_FP64 = "no_fp64"          # FP32 only (Apple Silicon)
+class FP64Support(Enum):
+    """FP64 support level."""
+    NATIVE = "native"      # Full-speed FP64 (professional GPUs)
+    SLOW = "slow"          # Emulated FP64 (1/32 speed on consumer GPUs)
+    NONE = "none"          # No FP64 support
 
 
 @dataclass
 class GPUCapabilities:
     """GPU hardware capabilities."""
     has_gpu: bool
+    gpu_type: str  # 'nvidia', 'mps', or 'none'
     gpu_name: str
-    gpu_type: str  # 'nvidia', 'mlx', or 'none'
-    fp64_support: PrecisionSupport
-    fp64_throughput_ratio: float
+    fp64_support: FP64Support
     recommended_fp64: bool
 
 
-def _detect_nvidia_capabilities() -> Optional[GPUCapabilities]:
-    """Detect NVIDIA GPU via PyTorch."""
+def detect_gpu_capabilities() -> GPUCapabilities:
+    """
+    Detect GPU capabilities for backend selection.
+    
+    Returns
+    -------
+    GPUCapabilities
+        Detected GPU information
+    
+    Examples
+    --------
+    >>> caps = detect_gpu_capabilities()
+    >>> if caps.has_gpu and caps.gpu_type == 'nvidia':
+    ...     print(f"Found NVIDIA GPU: {caps.gpu_name}")
+    >>> if caps.recommended_fp64:
+    ...     print("FP64 recommended for this hardware")
+    """
+    # Check for NVIDIA GPU via PyTorch
     try:
         import torch
-        
-        if not torch.cuda.is_available():
-            return None
-        
-        # Get GPU properties
-        props = torch.cuda.get_device_properties(0)
-        gpu_name = props.name
-        major, minor = props.major, props.minor
-        
-        # Determine FP64 support
-        # Professional GPUs: Full speed FP64
-        is_professional = any(
-            prefix in gpu_name.upper()
-            for prefix in ['TESLA', 'A100', 'H100', 'A40', 'V100', 'P100', 'QUADRO']
-        )
-        
-        if is_professional:
+        if torch.cuda.is_available():
+            gpu_name = torch.cuda.get_device_name(0)
+            
+            # Detect FP64 support based on compute capability
+            props = torch.cuda.get_device_properties(0)
+            major = props.major
+            minor = props.minor
+            
+            # Professional GPUs (compute capability >= 6.0) have native FP64
+            # Consumer GPUs have 1/32 speed FP64
+            if major >= 6:
+                fp64_support = FP64Support.NATIVE
+            elif major == 5 or (major == 3 and minor >= 5):
+                fp64_support = FP64Support.SLOW
+            else:
+                fp64_support = FP64Support.NONE
+            
             return GPUCapabilities(
                 has_gpu=True,
-                gpu_name=f"{gpu_name} (SM {major}.{minor})",
-                gpu_type="nvidia",
-                fp64_support=PrecisionSupport.FULL_FP64,
-                fp64_throughput_ratio=0.5,
-                recommended_fp64=True
+                gpu_type='nvidia',
+                gpu_name=gpu_name,
+                fp64_support=fp64_support,
+                recommended_fp64=(fp64_support == FP64Support.NATIVE)
             )
-        else:
-            # Consumer GPUs: 1/32 FP64 throughput
+    except ImportError:
+        pass
+    
+    # Check for Apple Silicon MPS
+    try:
+        import torch
+        if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            import platform
+            gpu_name = f"Apple {platform.processor()} (MPS)"
+            
             return GPUCapabilities(
                 has_gpu=True,
-                gpu_name=f"{gpu_name} (SM {major}.{minor})",
-                gpu_type="nvidia",
-                fp64_support=PrecisionSupport.GIMPED_FP64,
-                fp64_throughput_ratio=1/32,
+                gpu_type='mps',
+                gpu_name=gpu_name,
+                fp64_support=FP64Support.NONE,
                 recommended_fp64=False
             )
+    except (ImportError, AttributeError):
+        pass
     
-    except ImportError:
-        return None
-    except Exception:
-        return None
-
-
-def _detect_mlx_capabilities() -> Optional[GPUCapabilities]:
-    """Detect Apple Silicon via MLX."""
-    try:
-        import mlx.core as mx
-        
-        # Verify macOS
-        if platform.system() != 'Darwin':
-            return None
-        
-        # Verify Apple Silicon
-        machine = platform.machine()
-        if machine not in ['arm64', 'aarch64']:
-            return None
-        
-        # Try to get chip name
-        try:
-            import subprocess
-            result = subprocess.run(
-                ['sysctl', '-n', 'machdep.cpu.brand_string'],
-                capture_output=True,
-                text=True,
-                timeout=1
-            )
-            cpu_brand = result.stdout.strip()
-            if 'Apple' in cpu_brand:
-                gpu_name = f"Apple Silicon GPU ({cpu_brand})"
-            else:
-                gpu_name = f"Apple Silicon GPU ({machine})"
-        except:
-            gpu_name = f"Apple Silicon GPU ({machine})"
-        
-        return GPUCapabilities(
-            has_gpu=True,
-            gpu_name=gpu_name,
-            gpu_type="mlx",
-            fp64_support=PrecisionSupport.NO_FP64,
-            fp64_throughput_ratio=0.0,
-            recommended_fp64=False
-        )
-    
-    except ImportError:
-        return None
-    except Exception:
-        return None
-
-
-def detect_gpu_capabilities() -> GPUCapabilities:
-    """Detect available GPU and capabilities.
-    
-    Priority: NVIDIA CUDA → Apple MLX → No GPU
-    """
-    # Try NVIDIA first
-    nvidia = _detect_nvidia_capabilities()
-    if nvidia:
-        return nvidia
-    
-    # Try Apple Silicon
-    mlx = _detect_mlx_capabilities()
-    if mlx:
-        return mlx
-    
-    # No GPU
+    # No GPU detected - CPU only
     return GPUCapabilities(
         has_gpu=False,
-        gpu_name="No GPU detected (CPU only)",
-        gpu_type="none",
-        fp64_support=PrecisionSupport.NO_FP64,
-        fp64_throughput_ratio=0.0,
-        recommended_fp64=False
+        gpu_type='none',
+        gpu_name='CPU',
+        fp64_support=FP64Support.NATIVE,
+        recommended_fp64=True
     )
 
 
-def recommend_precision(caps: GPUCapabilities, use_fp64: Optional[bool]) -> bool:
-    """Recommend precision based on hardware.
-    
-    Returns True if FP64 should be used.
+def recommend_precision(caps: GPUCapabilities, user_preference: Optional[bool]) -> bool:
     """
-    # User explicitly requested FP64
-    if use_fp64 is True:
-        return True
+    Recommend FP32 vs FP64 based on hardware and user preference.
     
-    # User explicitly requested FP32
-    if use_fp64 is False:
-        return False
+    Parameters
+    ----------
+    caps : GPUCapabilities
+        Hardware capabilities
+    user_preference : bool or None
+        User's precision preference (None = auto-detect)
     
-    # Auto-detect
-    if not caps.has_gpu:
-        return True  # CPU always uses FP64
+    Returns
+    -------
+    bool
+        True if FP64 is recommended, False for FP32
     
-    if caps.gpu_type == 'mlx':
-        return False  # Apple Silicon only has FP32
+    Decision logic:
+    - User explicitly requests FP64 → FP64 (may be slow on consumer GPU)
+    - User explicitly requests FP32 → FP32
+    - No user preference:
+        - Professional GPU (native FP64) → FP64
+        - Consumer GPU (slow FP64) → FP32
+        - Apple Silicon (no FP64) → FP32
+        - CPU → FP64
     
-    # NVIDIA: use FP64 only if professional GPU
+    Examples
+    --------
+    >>> caps = detect_gpu_capabilities()
+    >>> use_fp64 = recommend_precision(caps, user_preference=None)
+    """
+    if user_preference is not None:
+        return user_preference
+    
+    # Auto-detect based on hardware
     return caps.recommended_fp64
-
-
-def validate_fp64_request(caps: GPUCapabilities, use_fp64: bool):
-    """Validate FP64 request against hardware capabilities."""
-    if use_fp64 and caps.has_gpu and caps.fp64_support == PrecisionSupport.NO_FP64:
-        raise ValueError(
-            f"FP64 requested but {caps.gpu_name} does not support FP64. "
-            "Please use FP32 (use_fp64=False) or CPU backend."
-        )
-
-
-def print_gpu_info():
-    """Print GPU detection results (diagnostic)."""
-    caps = detect_gpu_capabilities()
-    
-    print("GPU Detection Results:")
-    print(f"  GPU Available: {caps.has_gpu}")
-    print(f"  GPU Name: {caps.gpu_name}")
-    print(f"  GPU Type: {caps.gpu_type}")
-    print(f"  FP64 Support: {caps.fp64_support.value}")
-    print(f"  FP64/FP32 Ratio: {caps.fp64_throughput_ratio:.3f}")
-    print(f"  Recommended FP64: {caps.recommended_fp64}")
-    
-    use_fp64 = recommend_precision(caps, None)
-    print(f"\nRecommended Precision: {'FP64' if use_fp64 else 'FP32'}")
-
-
-if __name__ == "__main__":
-    print_gpu_info()

@@ -103,10 +103,10 @@ class BackendFactory:
             return CPUBackendFP64()
         
         # GPU available - check type
-        if caps.gpu_type == 'mlx':
-            # Apple Silicon - MLX only supports FP32
-            from .gpu_metal_backend import MLXBackendFP32
-            return MLXBackendFP32()
+        if caps.gpu_type == 'mps':
+            # Apple Silicon - MPS uses ridge regression (FP32 only)
+            from .gpu_mps_ridge_backend import MPSRidgeBackendFP32
+            return MPSRidgeBackendFP32()
         
         # NVIDIA GPU
         if use_fp64:

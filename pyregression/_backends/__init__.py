@@ -1,7 +1,7 @@
 """
 Backend selection and management.
 
-Provides unified interface for CPU, NVIDIA GPU, and Apple Silicon GPU backends.
+Provides unified interface for CPU, NVIDIA GPU (PyTorch), and Apple Silicon GPU (MPS).
 """
 
 from typing import Optional
@@ -23,7 +23,7 @@ except ImportError:
     CPU_AVAILABLE = False
     warnings.warn("CPU backend unavailable - installation error!")
 
-# Try importing PyTorch backends
+# Try importing PyTorch backends (NVIDIA GPU)
 try:
     from .gpu_fp32_backend import PyTorchBackendFP32
     PYTORCH_FP32_AVAILABLE = True
@@ -36,12 +36,15 @@ try:
 except ImportError:
     PYTORCH_FP64_AVAILABLE = False
 
-# Try importing MPS ridge backend
+# Try importing MPS ridge backend (Apple Silicon GPU)
 try:
     from .gpu_mps_ridge_backend import MPSRidgeBackendFP32
     MPS_AVAILABLE = True
 except ImportError:
     MPS_AVAILABLE = False
+
+# MLX is no longer supported - removed in favor of MPS
+MLX_AVAILABLE = False
 
 
 def get_backend(backend: str = 'auto', use_fp64: Optional[bool] = None) -> BackendBase:
@@ -54,15 +57,15 @@ def get_backend(backend: str = 'auto', use_fp64: Optional[bool] = None) -> Backe
         Backend selection:
         - 'auto': Auto-select based on hardware
         - 'cpu': CPU with NumPy (FP64, R-compatible)
-        - 'gpu': Any available GPU (PyTorch or MLX)
+        - 'gpu': Any available GPU (PyTorch CUDA or MPS)
         - 'pytorch': Force PyTorch CUDA (NVIDIA only)
-        - 'mlx': Force MLX Metal (Apple Silicon only)
+        - 'mps': Force MPS (Apple Silicon only)
     
     use_fp64 : bool or None
         Precision preference:
         - None: Auto-detect
-        - True: Force FP64 (CPU or professional GPU)
-        - False: Allow FP32 (GPU)
+        - True: Force FP64 (CPU or professional NVIDIA GPU)
+        - False: Allow FP32 (consumer GPU or MPS)
     
     Returns
     -------
@@ -82,7 +85,7 @@ def get_backend(backend: str = 'auto', use_fp64: Optional[bool] = None) -> Backe
     
     >>> # Force specific GPU type
     >>> backend = get_backend('pytorch')  # NVIDIA
-    >>> backend = get_backend('mlx')      # Apple
+    >>> backend = get_backend('mps')      # Apple Silicon
     """
     
     if backend == 'auto':
@@ -102,8 +105,8 @@ def get_backend(backend: str = 'auto', use_fp64: Optional[bool] = None) -> Backe
         if caps.has_gpu:
             if caps.gpu_type == 'nvidia' and PYTORCH_FP32_AVAILABLE:
                 return PyTorchBackendFP32()
-            elif caps.gpu_type == 'mlx' and MLX_AVAILABLE:
-                return MLXBackendFP32()
+            elif caps.gpu_type == 'mps' and MPS_AVAILABLE:
+                return MPSRidgeBackendFP32()
         
         # Default to CPU
         if not CPU_AVAILABLE:
@@ -124,7 +127,7 @@ def get_backend(backend: str = 'auto', use_fp64: Optional[bool] = None) -> Backe
                 "Options:\n"
                 "  - Use backend='cpu'\n"
                 "  - Install PyTorch with CUDA for NVIDIA\n"
-                "  - Install MLX for Apple Silicon"
+                "  - Install PyTorch with MPS for Apple Silicon"
             )
         
         # Route to appropriate GPU
@@ -141,13 +144,13 @@ def get_backend(backend: str = 'auto', use_fp64: Optional[bool] = None) -> Backe
                     "Install: pip install torch"
                 )
         
-        elif caps.gpu_type == 'mlx':
-            if not MLX_AVAILABLE:
+        elif caps.gpu_type == 'mps':
+            if not MPS_AVAILABLE:
                 raise RuntimeError(
-                    "Apple Silicon detected but MLX unavailable.\n"
-                    "Install: pip install mlx"
+                    "Apple Silicon detected but MPS backend unavailable.\n"
+                    "Install PyTorch with MPS support"
                 )
-            return MLXBackendFP32()
+            return MPSRidgeBackendFP32()
         
         else:
             raise RuntimeError(f"Unsupported GPU type: {caps.gpu_type}")
@@ -167,19 +170,18 @@ def get_backend(backend: str = 'auto', use_fp64: Optional[bool] = None) -> Backe
                 "Install: pip install torch"
             )
     
-    elif backend == 'mlx':
-        if not MLX_AVAILABLE:
+    elif backend == 'mps':
+        if not MPS_AVAILABLE:
             raise RuntimeError(
-                "MLX backend unavailable.\n"
-                "Install: pip install mlx\n"
-                "Note: MLX only works on macOS with Apple Silicon"
+                "MPS backend unavailable.\n"
+                "Install PyTorch with MPS support"
             )
-        return MLXBackendFP32()
+        return MPSRidgeBackendFP32()
     
     else:
         raise ValueError(
             f"Unknown backend: '{backend}'\n"
-            f"Valid options: 'auto', 'cpu', 'gpu', 'pytorch', 'mlx'"
+            f"Valid options: 'auto', 'cpu', 'gpu', 'pytorch', 'mps'"
         )
 
 
@@ -233,7 +235,12 @@ __all__ = [
     'BackendBase',
     'BackendFactory',
     'detect_gpu_capabilities',
-    'check_ridge_suitability',  # For advanced users
+    'check_ridge_suitability',
+    'CPU_AVAILABLE',
+    'PYTORCH_FP32_AVAILABLE',
+    'PYTORCH_FP64_AVAILABLE',
+    'MPS_AVAILABLE',
+    'MLX_AVAILABLE',
 ]
 
 
