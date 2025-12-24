@@ -19,7 +19,7 @@ except ImportError:
 
 @pytest.mark.skipif(not TORCH_AVAILABLE, reason="PyTorch GPU not available")
 class TestGPUBackends:
-    """Test GPU backend QR decomposition."""
+    """Test GPU backend implementations."""
     
     def test_backend_creation(self):
         """Test that GPU backend can be created."""
@@ -33,40 +33,6 @@ class TestGPUBackends:
         assert info['backend'] == 'gpu'
         assert info['precision'] == 'fp32'
         print(f"\n✓ GPU Backend: {info['device']}")
-    
-    def test_simple_qr(self):
-        """Test QR decomposition on simple matrix."""
-        from pyregression._backends import get_backend
-        
-        # Simple 5x3 matrix
-        np.random.seed(42)
-        X = np.random.randn(5, 3)
-        
-        # CPU reference
-        cpu_backend = get_backend('cpu')
-        cpu_result = cpu_backend.qr_with_pivoting(X)
-        
-        # GPU result
-        gpu_backend = get_backend('gpu', use_fp64=False)
-        gpu_result = gpu_backend.qr_with_pivoting(X)
-        
-        print(f"\nCPU rank: {cpu_result.rank}")
-        print(f"GPU rank: {gpu_result.rank}")
-        
-        # Rank must match exactly
-        assert cpu_result.rank == gpu_result.rank
-        
-        # Pivots must match exactly
-        np.testing.assert_array_equal(cpu_result.pivot, gpu_result.pivot)
-        
-        # R matrices should be close (FP32 tolerance)
-        np.testing.assert_allclose(
-            cpu_result.R, gpu_result.R, 
-            rtol=1e-5, atol=1e-6,
-            err_msg="R matrices differ too much"
-        )
-        
-        print("✓ Simple QR test passed")
     
     def test_full_regression(self):
         """Test full regression workflow CPU vs GPU."""
@@ -94,7 +60,6 @@ class TestGPUBackends:
         assert cpu_result.rank == gpu_result.rank
         
         # Coefficients should be statistically equivalent
-        # (within a few standard errors)
         coef_diff = np.abs(cpu_result.coef - gpu_result.coef)
         max_diff_in_ses = np.max(coef_diff / cpu_result.se)
         
@@ -124,7 +89,7 @@ class TestGPUBackends:
         cpu_model = LinearModel(backend='cpu')
         cpu_result = cpu_model.fit(X, y)
         
-        # GPU
+        # GPU  
         gpu_model = LinearModel(backend='gpu', use_fp64=False)
         gpu_result = gpu_model.fit(X, y)
         

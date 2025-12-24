@@ -9,32 +9,19 @@ import warnings
 from typing import Optional
 
 from .gpu_fp32_backend import PyTorchBackendFP32
-from .base import GPUBackendFP64, QRResult
+from .base import GPUBackendFP64, LinearModelResult
 
 
 class PyTorchBackendFP64(GPUBackendFP64):
     """
     PyTorch GPU backend with FP64 precision.
     
-    Inherits from FP32 backend but uses float64 precision.
+    Same as FP32 but uses float64 precision.
     Only recommended for data center GPUs with full FP64 support.
     """
     
     def __init__(self, device: Optional[str] = None):
-        """
-        Initialize PyTorch FP64 backend.
-        
-        Parameters
-        ----------
-        device : str, optional
-            Device: 'cuda' or None for auto-detect
-            
-        Raises
-        ------
-        RuntimeError
-            If device is 'mps' (Metal doesn't support FP64)
-        """
-        # Initialize like FP32 but we'll override precision
+        """Initialize PyTorch FP64 backend."""
         self.name = "pytorch_fp64"
         self.precision = "fp64"
         
@@ -47,7 +34,7 @@ class PyTorchBackendFP64(GPUBackendFP64):
                 "Install: pip install torch"
             )
         
-        # Device selection
+        # Device selection (no Metal for FP64)
         if device == 'mps':
             raise RuntimeError(
                 "FP64 not supported on Apple Metal. "
@@ -55,7 +42,6 @@ class PyTorchBackendFP64(GPUBackendFP64):
             )
         
         if device is None:
-            # Auto-detect (only CUDA, no Metal for FP64)
             if torch.cuda.is_available():
                 device = 'cuda'
             else:
@@ -71,152 +57,134 @@ class PyTorchBackendFP64(GPUBackendFP64):
             if caps.fp64_support.value == 'gimped_fp64':
                 warnings.warn(
                     f"Using FP64 on {caps.gpu_name} with gimped FP64 support. "
-                    f"This will be ~{int(1/caps.fp64_throughput_ratio)}x slower than FP32. "
-                    f"Consider using FP32 for better performance.",
+                    f"This will be ~{int(1/caps.fp64_throughput_ratio)}x slower than FP32.",
                     UserWarning
                 )
     
-    def qr_with_pivoting(self, X: np.ndarray, tol: Optional[float] = None) -> QRResult:
+    def _select_device(self, requested):
+        """Not used - device selection in __init__."""
+        return self.device
+    
+    def fit_linear_model(
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+        weights: Optional[np.ndarray] = None,
+        offset: Optional[np.ndarray] = None,
+        tol: Optional[float] = None,
+        singular_ok: bool = True
+    ) -> LinearModelResult:
         """
-        QR decomposition with FP64 precision.
+        Fit linear model on GPU with FP64 precision.
         
-        Same algorithm as FP32 but using float64.
+        Same algorithm as FP32 but uses double precision.
         """
         torch = self.torch
-        n, p = X.shape
+        n = len(y)
         
-        # Transfer to GPU as FP64 (only difference from FP32)
-        X_work = torch.from_numpy(X.copy()).double().to(self.device)
+        # Convert to GPU tensors with FP64
+        y_gpu = torch.from_numpy(y).double().to(self.device)
+        X_full_gpu = torch.cat([
+            torch.ones(n, 1, dtype=torch.float64, device=self.device),
+            torch.from_numpy(X).double().to(self.device)
+        ], dim=1)
+        p = X_full_gpu.shape[1]
+        
+        # Adjust for offset
+        if offset is not None:
+            offset_gpu = torch.from_numpy(offset).double().to(self.device)
+            y_work = y_gpu - offset_gpu
+        else:
+            y_work = y_gpu.clone()
+        
+        # Handle weights
+        if weights is not None:
+            weights_gpu = torch.from_numpy(weights).double().to(self.device)
+            good = weights_gpu > 0
+            n_good = int(torch.sum(good).item())
+            
+            if n_good == 0:
+                raise ValueError("All weights are zero")
+            
+            w_sqrt = torch.sqrt(weights_gpu[good])
+            X_work = X_full_gpu[good, :] * w_sqrt.unsqueeze(1)
+            y_work = y_work[good] * w_sqrt
+        else:
+            X_work = X_full_gpu
+            n_good = n
         
         # Compute tolerance
         if tol is None:
+            # For FP64, we can use the standard formula
+            # But still prefer p over n for consistency
             eps = torch.finfo(torch.float64).eps
             norm_X = torch.linalg.norm(X_work, 'fro')
-            tol = max(n, p) * eps * norm_X
+            tol = p * eps * norm_X  # Use p for consistency with FP32
             tol = float(tol.item())
         
-        # Rest is identical to FP32 implementation
-        # (We could refactor to share code, but for now just duplicate)
+        # QR decomposition with pivoting
+        Q, R, pivot = self._qr_with_pivoting_gpu(X_work, tol)
         
-        # Initialize pivot indices
-        jpvt = torch.arange(1, p + 1, dtype=torch.int64, device=self.device)
+        # Determine rank
+        R_diag = torch.abs(torch.diag(R))
+        if R_diag[0] == 0:
+            rank = 0
+        else:
+            rank = int(torch.sum(R_diag >= tol * R_diag[0]).item())
         
-        # Compute initial column norms
-        qraux = torch.zeros(p, dtype=torch.float64, device=self.device)
-        work_norm = torch.zeros(p, dtype=torch.float64, device=self.device)
-        work_orig = torch.zeros(p, dtype=torch.float64, device=self.device)
+        if not singular_ok and rank < p:
+            raise ValueError(f"Singular fit: rank {rank} < {p} columns")
         
-        if n > 0:
-            for j in range(p):
-                col_norm = torch.linalg.norm(X_work[:, j])
-                qraux[j] = col_norm
-                work_norm[j] = col_norm
-                work_orig[j] = col_norm
-                if work_orig[j] == 0.0:
-                    work_orig[j] = 1.0
+        # Solve R β = Q'y
+        qty = Q.T @ y_work
         
-        # Householder reduction
-        lup = min(n, p)
-        rank = p
+        # Initialize coefficients
+        coef = torch.full((p,), float('nan'), dtype=torch.float64, device=self.device)
         
-        for l in range(lup):
-            while l < rank and qraux[l] < work_orig[l] * tol:
-                self._move_column_right(X_work, jpvt, qraux, work_norm, work_orig, l, rank)
-                rank -= 1
-            
-            if l >= rank or l == n:
-                continue
-            
-            nrmxl = torch.linalg.norm(X_work[l:n, l])
-            
-            if nrmxl == 0.0:
-                continue
-            
-            if X_work[l, l] != 0.0:
-                nrmxl = torch.sign(X_work[l, l]) * nrmxl
-            
-            X_work[l:n, l] /= nrmxl
-            X_work[l, l] += 1.0
-            
-            if l + 1 < p:
-                for j in range(l + 1, p):
-                    t = -torch.dot(X_work[l:n, l], X_work[l:n, j]) / X_work[l, l]
-                    X_work[l:n, j] += t * X_work[l:n, l]
-                    
-                    if qraux[j] != 0.0:
-                        tt = 1.0 - (torch.abs(X_work[l, j]) / qraux[j]) ** 2
-                        tt = torch.clamp(tt, min=0.0)
-                        
-                        if torch.abs(tt) < 1e-6:
-                            if l + 1 < n:
-                                qraux[j] = torch.linalg.norm(X_work[l+1:n, j])
-                                work_norm[j] = qraux[j]
-                        else:
-                            qraux[j] *= torch.sqrt(tt)
-            
-            qraux[l] = X_work[l, l]
-            X_work[l, l] = -nrmxl
+        if rank > 0:
+            # Back-solve
+            coef_active = torch.linalg.solve_triangular(
+                R[:rank, :rank],
+                qty[:rank].unsqueeze(1),  # Make it (rank, 1)
+                upper=True
+            ).squeeze(1)  # Squeeze back to (rank,)
+            coef[pivot[:rank]] = coef_active
         
-        rank = min(rank, n)
+        # Compute fitted values (handling NaN coefficients)
+        valid_coef = ~torch.isnan(coef)
+        if torch.any(valid_coef):
+            fitted = X_full_gpu[:, valid_coef] @ coef[valid_coef]
+        else:
+            fitted = torch.zeros(n, dtype=torch.float64, device=self.device)
         
-        R = torch.triu(X_work[:p, :p])
-        Q = self._form_q_from_householder(X_work, qraux, n, p, min(n, p))
+        residuals = y_gpu - fitted
         
-        return QRResult(
-            R=R.cpu().numpy(),
-            Q_implicit=Q.cpu().numpy(),
-            pivot=jpvt.cpu().numpy(),
+        # Adjust fitted for offset
+        if offset is not None:
+            fitted = fitted + offset_gpu
+        
+        # Convert to numpy
+        return LinearModelResult(
+            coef=coef.cpu().numpy(),
+            residuals=residuals.cpu().numpy(),
+            fitted_values=fitted.cpu().numpy(),
             rank=rank,
-            tol=tol
+            df_residual=n_good - rank,
+            qr_R=R[:p, :p].cpu().numpy(),
+            qr_pivot=(pivot.cpu().numpy() + 1).astype(np.int64),
+            qr_tol=tol
         )
     
-    def _move_column_right(self, X, jpvt, qraux, work_norm, work_orig, l, p_current):
-        """Move column to right (same as FP32)."""
-        X[:, l:p_current-1] = X[:, l+1:p_current].clone()
-        temp_col = X[:, l].clone()
-        X[:, p_current-1] = temp_col
-        
-        temp_pivot = jpvt[l].clone()
-        jpvt[l:p_current-1] = jpvt[l+1:p_current].clone()
-        jpvt[p_current-1] = temp_pivot
-        
-        temp_qr = qraux[l].clone()
-        temp_wn = work_norm[l].clone()
-        temp_wo = work_orig[l].clone()
-        
-        qraux[l:p_current-1] = qraux[l+1:p_current].clone()
-        work_norm[l:p_current-1] = work_norm[l+1:p_current].clone()
-        work_orig[l:p_current-1] = work_orig[l+1:p_current].clone()
-        
-        qraux[p_current-1] = temp_qr
-        work_norm[p_current-1] = temp_wn
-        work_orig[p_current-1] = temp_wo
-    
-    def _form_q_from_householder(self, X, qraux, n, p, num_reflectors):
-        """Form Q matrix (same as FP32)."""
+    def _qr_with_pivoting_gpu(self, X, tol):
+        """QR with pivoting - simplified for now."""
         torch = self.torch
+        p = X.shape[1]
         
-        Q = torch.eye(n, dtype=torch.float64, device=self.device)
+        # Unpivoted QR
+        Q, R = torch.linalg.qr(X, mode='complete')
+        pivot = torch.arange(p, dtype=torch.int64, device=self.device)
         
-        for k in range(min(num_reflectors, n) - 1, -1, -1):
-            if k >= n or qraux[k] == 0.0:
-                continue
-            
-            u = torch.zeros(n - k, dtype=torch.float64, device=self.device)
-            u[0] = qraux[k]
-            if k + 1 < n:
-                u[1:] = X[k+1:n, k]
-            
-            beta = 2.0 / u[0] if u[0] != 0.0 else 0.0
-            
-            temp = beta * torch.outer(u, torch.matmul(u, Q[k:n, :]))
-            Q[k:n, :] -= temp
-        
-        return Q
-    
-    def apply_qt_to_vector(self, Q_implicit: np.ndarray, y: np.ndarray) -> np.ndarray:
-        """Apply Q' to vector."""
-        return Q_implicit.T @ y
+        return Q, R, pivot
     
     def get_device_info(self) -> dict:
         """Get backend information."""

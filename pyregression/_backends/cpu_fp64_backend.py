@@ -5,10 +5,10 @@ This is the reference implementation validated against R.
 """
 
 import numpy as np
-from scipy.linalg import qr
+from scipy.linalg import qr, solve_triangular
 from typing import Optional
 
-from .base import BackendBase, CPUBackend, QRResult
+from .base import CPUBackend, LinearModelResult
 
 
 class CPUBackendFP64(CPUBackend):
@@ -17,97 +17,112 @@ class CPUBackendFP64(CPUBackend):
     
     Reference implementation for R compatibility.
     Always uses FP64 precision.
-    
-    Algorithm:
-    ---------
-    QR decomposition via SciPy's qr() with column pivoting.
-    This uses LAPACK under the hood but with a simpler interface.
     """
     
     def __init__(self):
         self.name = "cpu_fp64"
         self.precision = "fp64"
     
-    def qr_with_pivoting(self, X: np.ndarray, tol: Optional[float] = None) -> QRResult:
+    def fit_linear_model(
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+        weights: Optional[np.ndarray] = None,
+        offset: Optional[np.ndarray] = None,
+        tol: Optional[float] = None,
+        singular_ok: bool = True
+    ) -> LinearModelResult:
         """
-        QR decomposition with column pivoting.
+        Fit linear model using NumPy/LAPACK.
         
-        Parameters
-        ----------
-        X : ndarray, shape (n, p)
-            Matrix to decompose
-        tol : float, optional
-            Tolerance for rank determination
-            
-        Returns
-        -------
-        result : QRResult
-            QR decomposition
-            
-        Notes
-        -----
-        Uses SciPy's qr() with pivoting='True', which calls LAPACK.
-        Numerically equivalent to R within 1e-12.
+        Complete implementation - all computation stays in NumPy.
         """
-        n, p = X.shape
+        n = len(y)
+        
+        # Adjust for offset
+        y_work = y - offset if offset is not None else y.copy()
+        
+        # Add intercept
+        X_work = np.column_stack([np.ones(n), X])
+        p = X_work.shape[1]
+        
+        # Handle weights
+        if weights is not None:
+            good = weights > 0
+            if not np.any(good):
+                raise ValueError("All weights are zero")
+            
+            w_sqrt = np.sqrt(weights[good])
+            X_work = X_work[good, :] * w_sqrt[:, np.newaxis]
+            y_work = y_work[good] * w_sqrt
+            n_good = np.sum(good)
+        else:
+            good = np.ones(n, dtype=bool)
+            n_good = n
         
         # Ensure float64
-        X_copy = np.asarray(X, dtype=np.float64)
+        X_work = np.asarray(X_work, dtype=np.float64)
+        y_work = np.asarray(y_work, dtype=np.float64)
         
-        # Default tolerance
+        # Compute tolerance
         if tol is None:
             eps = np.finfo(np.float64).eps
-            tol = max(n, p) * eps * np.linalg.norm(X_copy, 'fro')
+            tol = max(n_good, p) * eps * np.linalg.norm(X_work, 'fro')
         
         # QR decomposition with column pivoting
-        # mode='full' returns full Q (n x n) and R (n x p)
-        # This matches R's behavior
-        Q, R, P = qr(X_copy, mode='full', pivoting=True)
+        Q, R, P = qr(X_work, mode='full', pivoting=True)
         
-        # Determine rank from diagonal of R
+        # Determine rank
         R_diag = np.abs(np.diag(R))
         if R_diag[0] == 0:
             rank = 0
         else:
             rank = np.sum(R_diag >= tol * R_diag[0])
         
-        # Store Q explicitly (we'll need it for apply_qt_to_vector)
-        Q_implicit = Q  # Store full Q matrix
+        if not singular_ok and rank < p:
+            raise ValueError(f"Singular fit: rank {rank} < {p} columns")
         
-        # Convert pivot to 1-indexed (R convention)
-        # SciPy returns P as column indices (0-indexed)
-        pivot = P.astype(np.int64) + 1
+        # Solve R β = Q'y
+        qty = Q.T @ y_work
         
-        return QRResult(
-            R=R,
-            Q_implicit=Q_implicit,
-            pivot=pivot,
+        # Initialize coefficients (with NaN for aliased)
+        coef = np.full(p, np.nan, dtype=np.float64)
+        
+        if rank > 0:
+            # Back-solve for non-aliased coefficients
+            coef_active = solve_triangular(
+                R[:rank, :rank],
+                qty[:rank],
+                lower=False
+            )
+            coef[P[:rank]] = coef_active
+        
+        # Compute fitted values and residuals on original scale
+        X_full = np.column_stack([np.ones(n), X])
+        
+        # Compute fitted values (handling NaN coefficients for aliased terms)
+        valid_coef = ~np.isnan(coef)
+        if np.any(valid_coef):
+            fitted = X_full[:, valid_coef] @ coef[valid_coef]
+        else:
+            fitted = np.zeros(n, dtype=np.float64)
+        
+        residuals = y - fitted
+        
+        # Adjust fitted values for offset
+        if offset is not None:
+            fitted += offset
+        
+        return LinearModelResult(
+            coef=coef,
+            residuals=residuals,
+            fitted_values=fitted,
             rank=rank,
-            tol=tol,
+            df_residual=n_good - rank,
+            qr_R=R[:p, :p],
+            qr_pivot=P.astype(np.int64) + 1,  # 1-indexed like R
+            qr_tol=tol
         )
-    
-    def apply_qt_to_vector(self, Q_implicit: np.ndarray, y: np.ndarray) -> np.ndarray:
-        """
-        Apply Q' to vector y.
-        
-        Parameters
-        ----------
-        Q_implicit : ndarray
-            Q matrix from QR decomposition
-        y : ndarray
-            Vector to transform
-            
-        Returns
-        -------
-        qty : ndarray
-            Q' @ y
-        """
-        Q = Q_implicit  # Q is stored explicitly
-        
-        # Q' @ y
-        qty = Q.T @ y
-        
-        return qty
     
     def get_device_info(self) -> dict:
         """Get backend information."""

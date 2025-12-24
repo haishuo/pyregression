@@ -46,3 +46,8 @@ Repository = "https://github.com/sgcx/PyRegression"
 
 [tool.setuptools]
 packages = ["pyregression"]
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+]

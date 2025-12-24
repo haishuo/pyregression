@@ -9,21 +9,17 @@ from typing import Optional
 from dataclasses import dataclass
 
 from ._backends import get_backend
+from ._backends.base import LinearModelResult as BackendResult
 from ._core.lm_solver import fit_linear_model
 
 
 @dataclass
-class LinearModelResult:
-    """Results from linear regression."""
-    coef: np.ndarray          # Coefficients
-    residuals: np.ndarray     # Residuals
-    fitted_values: np.ndarray # Fitted values
-    rank: int                 # Rank of design matrix
-    df_residual: int          # Residual degrees of freedom
+class LinearModelResult(BackendResult):
+    """
+    Results from linear regression.
     
-    # QR components
-    qr_R: np.ndarray          # R from QR decomposition
-    qr_pivot: np.ndarray      # Pivot indices
+    Extends backend result with computed statistics.
+    """
     
     # Statistics (computed lazily)
     _se: Optional[np.ndarray] = None
@@ -61,15 +57,18 @@ class LinearModelResult:
     
     def _compute_statistics(self):
         """Compute standard errors and covariance matrix."""
-        # TODO: Implement after QR solver complete
+        from scipy.linalg import solve_triangular
+        
         n = len(self.residuals)
         rss = np.sum(self.residuals ** 2)
         sigma_sq = rss / self.df_residual if self.df_residual > 0 else 0.0
         
         # Compute (R'R)^-1
-        from scipy.linalg import solve_triangular
-        R_inv = solve_triangular(self.qr_R[:self.rank, :self.rank], 
-                                  np.eye(self.rank), lower=False)
+        R_inv = solve_triangular(
+            self.qr_R[:self.rank, :self.rank],
+            np.eye(self.rank),
+            lower=False
+        )
         vcov_full = R_inv @ R_inv.T * sigma_sq
         
         # Expand to full size with NAs for aliased
@@ -83,7 +82,6 @@ class LinearModelResult:
     
     def _compute_r_squared(self):
         """Compute R-squared statistics."""
-        # TODO: Handle intercept correctly
         y = self.fitted_values + self.residuals
         rss = np.sum(self.residuals ** 2)
         tss = np.sum((y - np.mean(y)) ** 2)
@@ -91,7 +89,6 @@ class LinearModelResult:
         self._r_squared = 1 - rss / tss if tss > 0 else 0.0
         
         n = len(self.residuals)
-        p = self.rank
         if self.df_residual > 0:
             self._adj_r_squared = 1 - (1 - self._r_squared) * (n - 1) / self.df_residual
         else:
@@ -99,37 +96,10 @@ class LinearModelResult:
 
 
 class LinearModel:
-    """
-    Linear regression via QR decomposition.
-    
-    Provides R-compatible linear regression with optional GPU acceleration.
-    
-    Examples
-    --------
-    >>> import numpy as np
-    >>> from pyregression import LinearModel
-    >>> 
-    >>> X = np.random.randn(100, 5)
-    >>> y = X @ np.array([1, -0.5, 0.3, 0, 0.8]) + np.random.randn(100)
-    >>> 
-    >>> model = LinearModel()
-    >>> result = model.fit(X, y)
-    >>> print(result.coef)
-    >>> print(result.se)
-    >>> print(result.r_squared)
-    """
+    """Linear regression via QR decomposition."""
     
     def __init__(self, backend: str = 'auto', use_fp64: Optional[bool] = None):
-        """
-        Initialize linear model.
-        
-        Parameters
-        ----------
-        backend : str, default='auto'
-            Backend to use: 'auto', 'cpu', 'gpu'
-        use_fp64 : bool, optional
-            Use FP64 precision. If None, auto-select based on hardware.
-        """
+        """Initialize linear model."""
         self.backend = get_backend(backend, use_fp64=use_fp64)
     
     def fit(
@@ -141,36 +111,8 @@ class LinearModel:
         tol: Optional[float] = None,
         singular_ok: bool = True,
     ) -> LinearModelResult:
-        """
-        Fit linear model.
-        
-        Parameters
-        ----------
-        X : ndarray, shape (n, p)
-            Design matrix (without intercept - added automatically)
-        y : ndarray, shape (n,)
-            Response vector
-        weights : ndarray, shape (n,), optional
-            Observation weights for WLS
-        offset : ndarray, shape (n,), optional
-            Offset term
-        tol : float, optional
-            Tolerance for rank determination.
-            Default: max(n,p) * eps * ||X||_F
-        singular_ok : bool, default=True
-            If False, raise error on singular fit
-            
-        Returns
-        -------
-        result : LinearModelResult
-            Fitted model results
-            
-        Notes
-        -----
-        Uses QR decomposition with column pivoting via LAPACK.
-        Numerically equivalent to R's lm() within 1e-12.
-        """
-        return fit_linear_model(
+        """Fit linear model."""
+        backend_result = fit_linear_model(
             X, y,
             weights=weights,
             offset=offset,
@@ -178,3 +120,6 @@ class LinearModel:
             singular_ok=singular_ok,
             backend=self.backend
         )
+        
+        # Convert to user-facing result with lazy statistics
+        return LinearModelResult(**backend_result.__dict__)
